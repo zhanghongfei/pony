@@ -1259,9 +1259,14 @@ class Attribute(object):
             if type(val) is attr.py_type: return val
             return attr.py_type(val)
 
-        if not isinstance(val, reverse.entity):
-            throw(ConstraintError, 'Value of attribute %s must be an instance of %s. Got: %s'
-                                  % (attr, reverse.entity.__name__, val))
+        rentity = reverse.entity
+        if not isinstance(val, rentity):
+            if type(val) is not tuple: val = (val,)
+            if len(val) != len(rentity._pk_columns_): throw(ConstraintError,
+                'Invalid number of columns were specified for attribute %s. Expected: %d, got: %d'
+                % (attr, len(rentity._pk_columns_), len(val)))
+            return rentity._get_by_raw_pkval_(val)
+
         if obj is not None: cache = obj._session_cache_
         else: cache = entity._database_._get_cache()
         if cache is not val._session_cache_:
@@ -2765,7 +2770,7 @@ class EntityMeta(type):
                 avdict[attr] = attr.check(val, None, entity, from_db=False)
         else:
             get = entity._adict_.get
-            for name, val in kwargs.items():
+            for name, val in kwargs.iteritems():
                 attr = get(name)
                 if attr is None: throw(TypeError, 'Unknown attribute %r' % name)
                 avdict[attr] = attr.check(val, None, entity, from_db=False)
@@ -4262,21 +4267,34 @@ class Query(object):
             locals = sys._getframe(3).f_locals
             return query._process_lambda(func, globals, locals, order_by=False)
         if not kwargs: return query
-        attrnames = []
+
+        entity = query._translator.expr_type
+        if not isinstance(entity, EntityMeta): throw(TypeError,
+            'Keyword arguments are not allowed: since query result type is not an entity, filter() method can accept only lambda')
+
+        get = entity._adict_.get
+        filterattrs = []
         value_dict = {}
         next_id = query._next_kwarg_id
-        for attr in sorted(kwargs):
-            value = kwargs[attr]
+        for attrname, val in sorted(kwargs.iteritems()):
+            attr = get(attrname)
+            if attr is None: throw(AttributeError,
+                'Entity %s does not have attribute %s' % (entity.__name__, attrname))
+            if attr.is_collection: throw(TypeError,
+                '%s attribute %s cannot be used as a keyword argument for filtering'
+                % (attr.__class__.__name__, attr))
+            val = attr.check(val, None, entity, from_db=False)
             id = next_id
             next_id += 1
-            attrnames.append((attr, id, value is None))
-            value_dict[id] = value
-        attrnames = tuple(attrnames)
-        new_key = query._key + ('filter', attrnames)
-        new_filters = query._filters + (attrnames,)
+            filterattrs.append((attr, id, val is None))
+            value_dict[id] = val
+
+        filterattrs = tuple(filterattrs)
+        new_key = query._key + ('filter', filterattrs)
+        new_filters = query._filters + (filterattrs,)
         new_translator = query._database._translator_cache.get(new_key)
         if new_translator is None:
-            new_translator = query._translator.apply_kwfilters(attrnames)
+            new_translator = query._translator.apply_kwfilters(filterattrs)
             query._database._translator_cache[new_key] = new_translator
         new_query = query._clone(_key=new_key, _filters=new_filters, _translator=new_translator,
                                  _next_kwargs_id=next_id)
